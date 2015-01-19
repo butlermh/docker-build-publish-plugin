@@ -30,6 +30,7 @@ public class DockerBuilder extends Builder {
     private final String dockerfilePath;
     private final boolean skipBuild;
     private final boolean skipDecorate;
+    private final boolean tagLatest;
     private String repoTag;
     private boolean skipPush = true;
 
@@ -39,7 +40,7 @@ public class DockerBuilder extends Builder {
     * for the actual HTML fragment for the configuration screen.
     */
     @DataBoundConstructor
-    public DockerBuilder(String repoName, String repoTag, boolean skipPush, boolean noCache, boolean skipBuild, boolean skipDecorate, String dockerfilePath) {
+    public DockerBuilder(String repoName, String repoTag, boolean skipPush, boolean noCache, boolean skipBuild, boolean skipDecorate, boolean tagLatest, String dockerfilePath) {
         this.repoName = repoName;
         this.repoTag = repoTag;
         this.skipPush = skipPush;
@@ -47,6 +48,7 @@ public class DockerBuilder extends Builder {
         this.dockerfilePath = dockerfilePath;
         this.skipBuild = skipBuild;
         this.skipDecorate = skipDecorate;
+        this.tagLatest = tagLatest;
     }
 
     public String getRepoName() {return repoName; }
@@ -55,6 +57,7 @@ public class DockerBuilder extends Builder {
     public boolean isSkipBuild() { return skipBuild;}
     public boolean isSkipDecorate() { return skipDecorate;}
     public boolean isNoCache() { return noCache;}
+    public boolean isTagLatest() { return tagLatest;}
     public String getDockerfilePath() { return dockerfilePath; }
 
 
@@ -84,19 +87,21 @@ public class DockerBuilder extends Builder {
         return args;
     }
 
-    private String dockerBuildCommand(AbstractBuild build, BuildListener listener) throws IOException, InterruptedException, MacroEvaluationException {
-        if (isSkipBuild()) {
-            return maybeTagOnly(build, listener);
-        }
-        return buildAndTag(build, listener);
-    }
-
-    private String maybeTagOnly(AbstractBuild build, BuildListener listener) {
-        if (getRepoTag() == null || repoTag.trim().isEmpty()) {
+    private String tagLatest(AbstractBuild build, BuildListener listener, String tag) throws MacroEvaluationException, IOException, InterruptedException {
+        String buildTag = TokenMacro.expandAll(build, listener, getNameAndTag());
+        if (tag == null || tag.trim().isEmpty()) {
             return "echo 'Nothing to build or tag'";
         } else {
-            return "docker tag " + getRepoName() + " " + getNameAndTag();
+            return "docker tag -f " + tag + " " + getRepoName() + ":latest";
         }
+    }
+
+    private String buildAndTag(AbstractBuild build, BuildListener listener, String tag) throws MacroEvaluationException, IOException, InterruptedException {
+        String context = ".";
+        if (getDockerfilePath() != null && !getDockerfilePath().trim().equals("")) {
+            context = getDockerfilePath();
+        }
+        return "docker build -t " + tag + ((isNoCache()) ? " --no-cache=true " : "")  + " " + context;
     }
 
     private String buildAndTag(AbstractBuild build, BuildListener listener) throws MacroEvaluationException, IOException, InterruptedException {
@@ -120,10 +125,23 @@ public class DockerBuilder extends Builder {
                 build.setDisplayName(build.getDisplayName() + " " + TokenMacro.expandAll(build, listener, getNameAndTag()));
             }
 
-            return
-                maybeLogin(build, launcher, listener) &&
-                executeCmd(build, launcher, listener, dockerBuildCommand(build, listener)) &&
-                maybePush(build, launcher, listener);
+            boolean loginSuccessful = maybeLogin(build, launcher, listener);
+            boolean tagOrBuild = loginSuccessful;
+            if (loginSuccessful) {
+                String cmd = isSkipBuild() ? 
+                              tag(build, listener) :
+                              buildAndTag(build, listener);
+                tagOrBuild = executeCmd(build, launcher, listener, cmd);
+            }
+            boolean tagged = tagOrBuild;
+            if (tagOrBuild && isTagLatest()) {
+              tagged = executeCmd(build, launcher, listener, tagLatest(build, listener));
+            }
+            if (tagged) {
+              return maybePush(build, launcher, listener);
+            } else {
+              return false;
+            }
 
         } catch (IOException e) {
             return recordException(listener, e);
